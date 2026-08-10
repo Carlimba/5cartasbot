@@ -4,20 +4,20 @@ Herramienta en Python + Streamlit que calcula la **decisión matemáticamente pe
 en Video Póker Jacks or Better (tabla de pagos 9/6). Ideal para pausar partidas de
 YouTube, cargar la mano y ver qué cartas HOLD maximizan el valor esperado (EV).
 
-## App online (Streamlit Community Cloud)
+## App online
 
-1. Sube el código a GitHub (ya hecho si usaste el repo del proyecto).
-2. Entra a [share.streamlit.io](https://share.streamlit.io) con tu cuenta de GitHub.
-3. **New app** → elige el repo → Main file: `app.py` → Deploy.
-4. (Opcional) En **Settings → Secrets** añade claves de visión:
+**Link permanente:** [https://5cartasbot.streamlit.app/](https://5cartasbot.streamlit.app/)
+
+Cada `git push` a `master` actualiza la app automáticamente.
+
+### Secrets opcionales (visión por imagen)
+
+En Streamlit Cloud → **Settings → Secrets**:
 
 ```toml
 OPENAI_API_KEY = "sk-..."
 ANTHROPIC_API_KEY = "sk-ant-..."
 ```
-
-La app quedará en un link tipo:
-`https://<nombre-app>-<usuario>.streamlit.app`
 
 ### Instalación local
 
