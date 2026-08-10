@@ -1,18 +1,15 @@
 """
 Asistente en tiempo real — Video Póker Jacks or Better 9/6.
 
-Flujo:
-  1. Sube o pega un screenshot de la mano
-  2. OpenAI Vision detecta las 5 cartas
-  3. Corrige con selectboxes si hace falta
-  4. El motor calcula el HOLD de EV máximo (exacto)
+Flujo rápido:
+  Capturar pantalla del juego → Vision GPT-4o → EV óptimo (automático)
 
-Ejecutar:  streamlit run app.py
-Online:    https://5cartasbot.streamlit.app/
+Online: https://5cartasbot.streamlit.app/
 """
 
 from __future__ import annotations
 
+import hashlib
 import io
 import time
 
@@ -31,6 +28,7 @@ from poker_math import (
     parse_cards,
     top_n_strategies,
 )
+from screen_capture import data_url_to_bytes, screen_capture_button
 from vision import detect_cards_from_image, get_openai_api_key
 
 st.set_page_config(
@@ -71,9 +69,14 @@ def _init_state() -> None:
         "hand_ready": False,
         "image_bytes": None,
         "image_name": None,
+        "image_fp": None,
+        "last_processed_fp": None,
         "analysis_results": None,
         "last_elapsed": None,
         "card_options": all_card_codes(),
+        "auto_pipeline": True,
+        "pending_auto": False,
+        "last_capture_ts": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -91,6 +94,10 @@ def _label(card: str) -> str:
     return f"{format_card_pretty(card)}  ({card})"
 
 
+def _fingerprint(data: bytes) -> str:
+    return hashlib.sha1(data).hexdigest()
+
+
 def _set_hand(cards: list[str]) -> None:
     st.session_state.hand = cards
     st.session_state.hand_ready = True
@@ -98,6 +105,41 @@ def _set_hand(cards: list[str]) -> None:
     st.session_state.last_elapsed = None
     for i, c in enumerate(cards):
         st.session_state[f"card_sel_{i}"] = c
+
+
+def _store_image(image_bytes: bytes, name: str, *, trigger_auto: bool = True) -> None:
+    fp = _fingerprint(image_bytes)
+    st.session_state.image_bytes = image_bytes
+    st.session_state.image_name = name
+    st.session_state.image_fp = fp
+    if trigger_auto and st.session_state.auto_pipeline and fp != st.session_state.last_processed_fp:
+        st.session_state.pending_auto = True
+
+
+def _run_pipeline(image_bytes: bytes, api_key: str | None, *, run_ev: bool = True) -> None:
+    """Vision (+ EV opcional) sobre una captura."""
+    with st.spinner("Detectando cartas con GPT-4o…"):
+        cards = detect_cards_from_image(
+            image_bytes,
+            filename=st.session_state.image_name,
+            api_key=api_key,
+            detail="high",
+        )
+    _set_hand(cards)
+    st.session_state.last_processed_fp = st.session_state.image_fp
+    st.session_state.pending_auto = False
+
+    if run_ev:
+        progress = st.progress(0.0, text="Calculando EV óptimo…")
+
+        def _cb(done: int, total: int) -> None:
+            progress.progress(done / total, text=f"Hold {done}/{total}…")
+
+        t0 = time.perf_counter()
+        results = analyze_hand(cards, progress_callback=_cb)
+        st.session_state.analysis_results = results
+        st.session_state.last_elapsed = time.perf_counter() - t0
+        progress.progress(1.0, text="Listo")
 
 
 _init_state()
@@ -123,6 +165,12 @@ with st.sidebar:
         placeholder="sk-...",
     )
 
+    st.session_state.auto_pipeline = st.toggle(
+        "Procesar automáticamente",
+        value=st.session_state.auto_pipeline,
+        help="Al capturar/pegar/subir: detecta cartas y calcula el HOLD óptimo.",
+    )
+
     st.markdown("---")
     st.subheader("Tabla 9/6")
     st.dataframe(
@@ -138,11 +186,11 @@ with st.sidebar:
     )
     st.markdown("---")
     st.markdown(
-        "**Flujo YouTube**\n\n"
+        "**Flujo rápido YouTube**\n\n"
         "1. Pausa en las 5 cartas\n"
-        "2. Captura / pega screenshot\n"
-        "3. Detectar → corregir\n"
-        "4. Calcular → HOLD dorado"
+        "2. Pulsa **Capturar pantalla del juego**\n"
+        "3. Elige la pestaña de YouTube/casino\n"
+        "4. Espera el HOLD óptimo (dorado)"
     )
 
 # ---------------------------------------------------------------------------
@@ -151,24 +199,43 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">♠ Asistente Jacks or Better 9/6</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="sub-title">Screenshot → GPT-4o Vision → corrección → HOLD óptimo (EV exacto)</div>',
+    '<div class="sub-title">Captura de pantalla → GPT-4o → HOLD óptimo (automático)</div>',
     unsafe_allow_html=True,
 )
 
 # ---------------------------------------------------------------------------
-# 1) Captura
+# 1) Captura rápida
 # ---------------------------------------------------------------------------
 
-st.subheader("1 · Captura de pantalla")
-st.caption("Sube un PNG/JPG o pega desde el portapapeles (botón 📋).")
+st.subheader("1 · Capturar y analizar")
+st.caption(
+    "Pulsa el botón, elige la **pestaña o ventana** del Video Póker "
+    "(YouTube / casino) y confirma. El navegador no puede capturar en silencio: "
+    "hay que elegir la fuente una vez por captura."
+)
 
+captured = screen_capture_button(
+    label="📸 Capturar pantalla del juego y analizar",
+    key="screen_grab",
+)
+if captured and captured.get("data_url"):
+    ts = captured.get("ts")
+    if ts != st.session_state.last_capture_ts:
+        try:
+            img_bytes = data_url_to_bytes(captured["data_url"])
+            st.session_state.last_capture_ts = ts
+            _store_image(img_bytes, "screen_capture.jpg", trigger_auto=True)
+            st.rerun()
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"No se pudo leer la captura: {exc}")
+
+st.markdown("##### Otras formas de cargar la imagen")
 c_up, c_paste = st.columns([2, 1])
 with c_up:
     uploaded = st.file_uploader(
-        "Screenshot",
+        "Screenshot archivo",
         type=["png", "jpg", "jpeg", "webp"],
         accept_multiple_files=False,
-        label_visibility="collapsed",
     )
 with c_paste:
     try:
@@ -182,36 +249,58 @@ with c_paste:
         )
         if paste_result is not None and getattr(paste_result, "image_data", None) is not None:
             buf = io.BytesIO()
-            paste_result.image_data.convert("RGB").save(buf, format="PNG")
-            st.session_state.image_bytes = buf.getvalue()
-            st.session_state.image_name = "clipboard.png"
-            st.caption("✓ Pegada del portapapeles")
+            paste_result.image_data.convert("RGB").save(buf, format="JPEG", quality=85)
+            new_bytes = buf.getvalue()
+            if _fingerprint(new_bytes) != st.session_state.image_fp:
+                _store_image(new_bytes, "clipboard.jpg", trigger_auto=True)
+                st.rerun()
+            else:
+                st.caption("✓ Pegada del portapapeles")
     except Exception:
-        st.caption("Uploader = archivo · o Ctrl+V en el diálogo del sistema")
+        st.caption("También puedes subir un archivo")
 
 if uploaded is not None:
-    st.session_state.image_bytes = uploaded.getvalue()
-    st.session_state.image_name = uploaded.name
+    new_bytes = uploaded.getvalue()
+    new_fp = _fingerprint(new_bytes)
+    if new_fp != st.session_state.image_fp:
+        _store_image(new_bytes, uploaded.name, trigger_auto=True)
+        st.rerun()
 
 image_bytes = st.session_state.image_bytes
 if image_bytes:
     st.image(image_bytes, caption=st.session_state.image_name or "Captura", use_container_width=True)
 
-if st.button("Detectar 5 cartas con GPT-4o", type="primary", disabled=not bool(image_bytes)):
+# Pipeline automático pendiente
+if st.session_state.pending_auto and image_bytes:
     try:
-        with st.spinner("OpenAI Vision analizando la captura…"):
-            cards = detect_cards_from_image(
-                image_bytes,
-                filename=st.session_state.image_name,
-                api_key=api_key_ui or None,
-            )
-        _set_hand(cards)
-        st.success(f"Detectadas: **{format_hand_pretty(cards)}**")
+        _run_pipeline(image_bytes, api_key_ui or None, run_ev=True)
+        st.success(
+            f"Detectadas: **{format_hand_pretty(st.session_state.hand)}** · EV calculado"
+        )
         st.rerun()
     except CardError as exc:
+        st.session_state.pending_auto = False
         st.error(str(exc))
     except Exception as exc:  # noqa: BLE001
-        st.error(f"Error de la API de visión: {exc}")
+        st.session_state.pending_auto = False
+        st.error(f"Error al procesar: {exc}")
+
+# Botón manual si auto está off
+manual_cols = st.columns([1, 1, 2])
+with manual_cols[0]:
+    if st.button(
+        "Detectar + calcular ahora",
+        type="primary",
+        disabled=not bool(image_bytes),
+        use_container_width=True,
+    ):
+        try:
+            _run_pipeline(image_bytes, api_key_ui or None, run_ev=True)
+            st.rerun()
+        except CardError as exc:
+            st.error(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Error: {exc}")
 
 with st.expander("¿Sin captura? Cargar mano en texto"):
     manual_txt = st.text_input("5 cartas", placeholder="AH KH 10C 2S 5D")
@@ -227,10 +316,10 @@ with st.expander("¿Sin captura? Cargar mano en texto"):
 # 2) Corrección
 # ---------------------------------------------------------------------------
 
-st.subheader("2 · Cartas detectadas (corrige si la IA falló)")
+st.subheader("2 · Cartas (corrige si la IA falló)")
 
 if not st.session_state.hand_ready:
-    st.info("Todavía no hay mano. Detecta un screenshot o cárgala manualmente.")
+    st.info("Captura la pantalla del juego para empezar.")
 else:
     cols = st.columns(5)
     corrected: list[str] = []
@@ -257,7 +346,10 @@ else:
     try:
         hand = parse_cards(corrected)
         hand_ok = True
-        st.session_state.hand = hand
+        # Si el usuario corrigió, invalidar EV previo
+        if hand != st.session_state.hand:
+            st.session_state.hand = hand
+            st.session_state.analysis_results = None
         detail = evaluate_hand_detail(hand)
         st.caption(
             f"Mano: {format_hand_pretty(hand)} · "
@@ -266,31 +358,23 @@ else:
     except CardError as exc:
         st.error(f"Mano inválida: {exc}")
 
-    # -----------------------------------------------------------------------
-    # 3) EV
-    # -----------------------------------------------------------------------
+    st.subheader("3 · Jugada óptima")
 
-    st.subheader("3 · Jugada matemáticamente perfecta")
+    if hand_ok and st.session_state.analysis_results is None:
+        if st.button("Recalcular EV con la mano corregida", type="primary"):
+            progress = st.progress(0.0, text="Calculando…")
 
-    if st.button(
-        "Calcular HOLD óptimo (EV exacto · 32 combinaciones)",
-        type="primary",
-        disabled=not hand_ok,
-    ):
-        progress = st.progress(0.0, text="Enumerando draws del mazo…")
+            def _cb(done: int, total: int) -> None:
+                progress.progress(done / total, text=f"Hold {done}/{total}…")
 
-        def _cb(done: int, total: int) -> None:
-            progress.progress(done / total, text=f"Evaluando hold {done}/{total}…")
-
-        t0 = time.perf_counter()
-        try:
-            results = analyze_hand(hand, progress_callback=_cb)
-            st.session_state.analysis_results = results
-            st.session_state.last_elapsed = time.perf_counter() - t0
-            progress.progress(1.0, text="Listo")
-        except CardError as exc:
-            st.error(str(exc))
-            progress.empty()
+            t0 = time.perf_counter()
+            try:
+                st.session_state.analysis_results = analyze_hand(hand, progress_callback=_cb)
+                st.session_state.last_elapsed = time.perf_counter() - t0
+                progress.progress(1.0, text="Listo")
+                st.rerun()
+            except CardError as exc:
+                st.error(str(exc))
 
     results = st.session_state.analysis_results
     if results and hand_ok:
@@ -323,10 +407,7 @@ else:
                 f"{st.session_state.last_elapsed:.2f}s"
             )
 
-        if sum(1 for r in results if r.is_optimal) > 1:
-            st.warning("Hay varias estrategias empatadas en el EV máximo.")
-
-        st.markdown("#### Top 5 combinaciones (por EV)")
+        st.markdown("#### Top 5 combinaciones")
         top5 = pd.DataFrame(top_n_strategies(results, 5))[
             ["Rank", "Óptimo", "HOLD (cartas)", "Posiciones HOLD", "EV"]
         ]
@@ -339,5 +420,3 @@ else:
                 use_container_width=True,
                 height=420,
             )
-    elif hand_ok:
-        st.info("Pulsa **Calcular HOLD óptimo** para obtener la decisión perfecta.")

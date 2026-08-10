@@ -114,12 +114,12 @@ def detect_cards_from_image(
     filename: str | None = None,
     api_key: str | None = None,
     model: str = DEFAULT_MODEL,
+    detail: str = "high",
 ) -> list[str]:
     """
     Envía la captura a OpenAI Vision y devuelve exactamente 5 cartas normalizadas.
 
-    Raises:
-        CardError: si falta la key, la API falla o las cartas son inválidas/duplicadas.
+    detail: "low" es más rápido/barato; "high" más preciso en UIs densas.
     """
     key = get_openai_api_key(api_key)
     if not key:
@@ -154,7 +154,10 @@ def detect_cards_from_image(
                             "(izquierda a derecha). Devuelve solo el JSON array."
                         ),
                     },
-                    {"type": "image_url", "image_url": {"url": data_url, "detail": "high"}},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": data_url, "detail": detail},
+                    },
                 ],
             },
         ],

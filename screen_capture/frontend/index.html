@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      --bg: #2f5d45;
+      --bg-hover: #3d7a5a;
+      --text: #f5f5f0;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      font-family: "Segoe UI", "Trebuchet MS", sans-serif;
+    }
+    #wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 2px 0;
+    }
+    button {
+      appearance: none;
+      border: none;
+      border-radius: 10px;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 1rem;
+      font-weight: 650;
+      padding: 0.85rem 1.1rem;
+      cursor: pointer;
+      width: 100%;
+      box-shadow: 0 2px 0 #1a261b;
+    }
+    button:hover { background: var(--bg-hover); }
+    button:disabled {
+      opacity: 0.65;
+      cursor: wait;
+    }
+    #status {
+      font-size: 0.85rem;
+      color: #3d4f3f;
+      min-height: 1.2em;
+    }
+    #status.err { color: #a33; }
+    #status.ok { color: #1e5a38; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <button id="btn" type="button">📸 Capturar pantalla del juego</button>
+    <div id="status"></div>
+  </div>
+
+  <script>
+    // --- Bridge mínimo Streamlit Components (sin React) ---
+    function sendMessageToStreamlitClient(type, data) {
+      const outData = Object.assign({
+        isStreamlitMessage: true,
+        type: type,
+      }, data);
+      window.parent.postMessage(outData, "*");
+    }
+
+    function init() {
+      sendMessageToStreamlitClient("streamlit:componentReady", { apiVersion: 1 });
+    }
+
+    function setFrameHeight(height) {
+      sendMessageToStreamlitClient("streamlit:setFrameHeight", { height: height });
+    }
+
+    function sendDataToPython(value) {
+      sendMessageToStreamlitClient("streamlit:setComponentValue", { value: value });
+    }
+
+    let label = "📸 Capturar pantalla del juego";
+
+    function onRender(event) {
+      if (!event.data || event.data.type !== "streamlit:render") return;
+      const args = event.data.args || {};
+      if (args.label) {
+        label = args.label;
+        document.getElementById("btn").textContent = label;
+      }
+      setFrameHeight(document.body.scrollHeight);
+    }
+
+    window.addEventListener("message", onRender);
+    init();
+    setFrameHeight(70);
+
+    const btn = document.getElementById("btn");
+    const status = document.getElementById("status");
+
+    function setStatus(msg, cls) {
+      status.textContent = msg || "";
+      status.className = cls || "";
+      setFrameHeight(document.body.scrollHeight);
+    }
+
+    async function captureOnce() {
+      btn.disabled = true;
+      setStatus("Elige la pestaña/ventana del Video Póker…", "");
+
+      let stream = null;
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            frameRate: 5,
+            displaySurface: "browser",
+          },
+          audio: false,
+          preferCurrentTab: false,
+          selfBrowserSurface: "exclude",
+        });
+
+        const video = document.createElement("video");
+        video.playsInline = true;
+        video.muted = true;
+        video.srcObject = stream;
+        await video.play();
+
+        // Esperar un frame real
+        await new Promise((r) => setTimeout(r, 180));
+
+        const maxW = 1400;
+        let w = video.videoWidth || 1280;
+        let h = video.videoHeight || 720;
+        if (w > maxW) {
+          h = Math.round((h * maxW) / w);
+          w = maxW;
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(video, 0, 0, w, h);
+
+        // JPEG comprimido = más rápido hacia OpenAI
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
+
+        stream.getTracks().forEach((t) => t.stop());
+        stream = null;
+
+        sendDataToPython({
+          data_url: dataUrl,
+          ts: Date.now(),
+          width: w,
+          height: h,
+        });
+        setStatus("Captura lista — procesando…", "ok");
+      } catch (err) {
+        if (stream) stream.getTracks().forEach((t) => t.stop());
+        const msg = (err && err.message) ? err.message : String(err);
+        if (msg.toLowerCase().includes("denied") || msg.toLowerCase().includes("permission") || err.name === "NotAllowedError") {
+          setStatus("Captura cancelada o permiso denegado.", "err");
+        } else {
+          setStatus("Error: " + msg, "err");
+        }
+        sendDataToPython(null);
+      } finally {
+        btn.disabled = false;
+        setFrameHeight(document.body.scrollHeight);
+      }
+    }
+
+    btn.addEventListener("click", captureOnce);
+  </script>
+</body>
+</html>
